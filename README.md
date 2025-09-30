@@ -102,8 +102,8 @@ Create `/etc/cni/net.d/10-mynet.conf`:
     }
 }
 ```
-sudo mkdir -p /etc/cni/net.d
 
+```bash
 cat <<'EOF' | sudo tee /etc/cni/net.d/10-mynet.conf > /dev/null
 {
     "cniVersion": "0.3.1",
@@ -121,7 +121,7 @@ cat <<'EOF' | sudo tee /etc/cni/net.d/10-mynet.conf > /dev/null
     }
 }
 EOF
-
+```
 
 ## 8. Configure containerd
 Create `/etc/containerd/config.toml`:
@@ -152,6 +152,7 @@ version = 3
   SystemdCgroup = false
 ```
 
+```bash
 sudo tee /etc/containerd/config.toml >/dev/null <<'TOML'
 version = 3
 
@@ -178,6 +179,7 @@ version = 3
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]
   SystemdCgroup = false
 TOML
+```
 
 ## 9. Configure kubelet
 Create `/var/lib/kubelet/config.yaml`:
@@ -204,6 +206,8 @@ serverTLSBootstrap: false
 containerRuntimeEndpoint: "unix:///run/containerd/containerd.sock"
 staticPodPath: "/etc/kubernetes/manifests"
 ```
+
+```bash
 sudo tee /var/lib/kubelet/config.yaml >/dev/null <<'YAML'
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
@@ -227,6 +231,7 @@ serverTLSBootstrap: false
 containerRuntimeEndpoint: "unix:///run/containerd/containerd.sock"
 staticPodPath: "/etc/kubernetes/manifests"
 YAML
+```
 
 ## 10. Start Components
 
@@ -270,6 +275,7 @@ fi
 export HOST_IP
 echo "HOST_IP=$HOST_IP"
 SH
+```
 
 # Сделать исполняемым
 chmod +x detect_ip.sh
