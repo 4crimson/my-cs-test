@@ -102,6 +102,26 @@ Create `/etc/cni/net.d/10-mynet.conf`:
     }
 }
 ```
+sudo mkdir -p /etc/cni/net.d
+
+cat <<'EOF' | sudo tee /etc/cni/net.d/10-mynet.conf > /dev/null
+{
+    "cniVersion": "0.3.1",
+    "name": "mynet",
+    "type": "bridge",
+    "bridge": "cni0",
+    "isGateway": true,
+    "ipMasq": true,
+    "ipam": {
+        "type": "host-local",
+        "subnet": "10.22.0.0/16",
+        "routes": [
+            { "dst": "0.0.0.0/0" }
+        ]
+    }
+}
+EOF
+
 
 ## 8. Configure containerd
 Create `/etc/containerd/config.toml`:
@@ -132,6 +152,33 @@ version = 3
   SystemdCgroup = false
 ```
 
+sudo tee /etc/containerd/config.toml >/dev/null <<'TOML'
+version = 3
+
+[grpc]
+  address = "/run/containerd/containerd.sock"
+
+[plugins.'io.containerd.cri.v1.runtime']
+  enable_selinux = false
+  enable_unprivileged_ports = true
+  enable_unprivileged_icmp = true
+  device_ownership_from_security_context = false
+
+[plugins.'io.containerd.cri.v1.images']
+  snapshotter = "native"
+  disable_snapshot_annotations = true
+
+[plugins.'io.containerd.cri.v1.runtime'.cni]
+  bin_dir = "/opt/cni/bin"
+  conf_dir = "/etc/cni/net.d"
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
+  runtime_type = "io.containerd.runc.v2"
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]
+  SystemdCgroup = false
+TOML
+
 ## 9. Configure kubelet
 Create `/var/lib/kubelet/config.yaml`:
 ```yaml
@@ -157,6 +204,29 @@ serverTLSBootstrap: false
 containerRuntimeEndpoint: "unix:///run/containerd/containerd.sock"
 staticPodPath: "/etc/kubernetes/manifests"
 ```
+sudo tee /var/lib/kubelet/config.yaml >/dev/null <<'YAML'
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+authentication:
+  anonymous:
+    enabled: true
+  webhook:
+    enabled: true
+  x509:
+    clientCAFile: "/var/lib/kubelet/ca.crt"
+authorization:
+  mode: AlwaysAllow
+clusterDomain: "cluster.local"
+clusterDNS:
+  - "10.0.0.10"
+resolvConf: "/etc/resolv.conf"
+runtimeRequestTimeout: "15m"
+failSwapOn: false
+seccompDefault: true
+serverTLSBootstrap: false
+containerRuntimeEndpoint: "unix:///run/containerd/containerd.sock"
+staticPodPath: "/etc/kubernetes/manifests"
+YAML
 
 ## 10. Start Components
 
@@ -205,8 +275,7 @@ SH
 chmod +x detect_ip.sh
 
 # Выполнить и экспортировать переменную
-source ./detect_ip.sh
-
+eval "$(bash ./detect_ip.sh)"
 echo "$HOST_IP"
 ```
 
