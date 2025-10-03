@@ -269,7 +269,7 @@ start() {
             --storage-backend=etcd3 \
             --storage-media-type=application/json \
             --v=0 \
-            --cloud-provider=external \
+            #--cloud-provider=external \
             --service-account-issuer=https://kubernetes.default.svc.cluster.local \
             --service-account-key-file=/tmp/sa.pub \
             --service-account-signing-key-file=/tmp/sa.key &

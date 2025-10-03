@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-apiserver
+  namespace: kube-system
+  labels:
+    tier: control-plane
+    component: kube-apiserver
+spec:
+  hostNetwork: true
+  priorityClassName: system-cluster-critical
+  containers:
+  - name: kube-apiserver
+    image: registry.k8s.io/kube-apiserver:v1.30.0
+    command:
+      - kube-apiserver
+      - --etcd-servers=http://127.0.0.1:2379
+      - --bind-address=0.0.0.0
+      - --secure-port=6443
+      - --advertise-address=127.0.0.1
+      - --service-cluster-ip-range=10.0.0.0/24
+      - --authorization-mode=AlwaysAllow
+      - --token-auth-file=/tmp/token.csv
+      - --allow-privileged=true
+      - --profiling=false
+      - --storage-backend=etcd3
+      - --storage-media-type=application/json
+      - --service-account-issuer=https://kubernetes.default.svc.cluster.local
+      - --service-account-key-file=/tmp/sa.pub
+      - --service-account-signing-key-file=/tmp/sa.key
+      - --v=2
+      # ВАЖНО: без --cloud-provider=external (CCM не запускаем)
+    volumeMounts:
+      - name: host-tmp
+        mountPath: /tmp
+  volumes:
+    - name: host-tmp
+      hostPath:
+        path: /tmp
+        type: Directory
