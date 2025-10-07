@@ -3,43 +3,23 @@ kind: Pod
 metadata:
   name: kube-controller-manager
   namespace: kube-system
-  labels:
-    component: kube-controller-manager
 spec:
   hostNetwork: true
-  priorityClassName: system-cluster-critical
+  dnsPolicy: ClusterFirstWithHostNet
   containers:
   - name: kube-controller-manager
     image: registry.k8s.io/kube-controller-manager:v1.30.0
     command:
       - kube-controller-manager
-      - --kubeconfig=/etc/kubernetes/controller-manager.kubeconfig
-      - --leader-elect=false
-      - --service-cluster-ip-range=10.0.0.0/24
-      - --cluster-name=kubernetes
+      - --kubeconfig=/etc/kubernetes/controller-manager.conf
+      - --service-account-private-key-file=/etc/kubernetes/pki/sa.key
       - --root-ca-file=/etc/kubernetes/pki/ca.crt
-      - --service-account-private-key-file=/tmp/sa.key
-      - --use-service-account-credentials=true
-      - --v=2
+      - --leader-elect=false
+      - --port=0
+      - --secure-port=10257
     volumeMounts:
-      - name: pki
-        mountPath: /etc/kubernetes/pki
-        readOnly: true
-      - name: kc
-        mountPath: /etc/kubernetes/controller-manager.kubeconfig
-        readOnly: true
-      - name: hosttmp
-        mountPath: /tmp
+      - { name: pki, mountPath: /etc/kubernetes/pki, readOnly: true }
+      - { name: cfg, mountPath: /etc/kubernetes }
   volumes:
-    - name: pki
-      hostPath:
-        path: /var/lib/kubelet/pki         # ЭТО ДИРЕКТОРИЯ
-        type: Directory
-    - name: kc
-      hostPath:
-        path: /var/lib/kubelet/kubeconfig  # ЭТО ФАЙЛ
-        type: File
-    - name: hosttmp
-      hostPath:
-        path: /tmp
-        type: Directory
+    - { name: pki, hostPath: { path: /etc/kubernetes/pki } }
+    - { name: cfg, hostPath: { path: /etc/kubernetes } }

@@ -3,27 +3,23 @@ kind: Pod
 metadata:
   name: etcd
   namespace: kube-system
+  labels: {tier: control-plane, component: etcd}
 spec:
   hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
   containers:
   - name: etcd
     image: registry.k8s.io/etcd:3.5.12-0
-    command:
-      - etcd
-      - --name=etcd0
-      - --data-dir=/var/lib/etcd
-      - --advertise-client-urls=http://127.0.0.1:2379
-      - --listen-client-urls=http://0.0.0.0:2379
-      - --listen-peer-urls=http://0.0.0.0:2380
-      - --initial-advertise-peer-urls=http://127.0.0.1:2380
-      - --initial-cluster=etcd0=http://127.0.0.1:2380
-      - --initial-cluster-state=new
-      - --initial-cluster-token=etcd-cluster
+    command: ["etcd",
+      "--name=etcd-standalone",
+      "--data-dir=/var/lib/etcd",
+      "--advertise-client-urls=http://127.0.0.1:2379",
+      "--listen-client-urls=http://127.0.0.1:2379",
+      "--listen-peer-urls=http://127.0.0.1:2380",
+      "--initial-advertise-peer-urls=http://127.0.0.1:2380",
+      "--listen-metrics-urls=http://127.0.0.1:2381"]
     volumeMounts:
-    - name: etcd-data
-      mountPath: /var/lib/etcd
+      - { name: etcd-data, mountPath: /var/lib/etcd }
   volumes:
-  - name: etcd-data
-    hostPath:
-      path: /var/lib/etcd
-      type: DirectoryOrCreate
+    - name: etcd-data
+      hostPath: { path: /var/lib/etcd, type: DirectoryOrCreate }
