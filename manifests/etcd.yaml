@@ -1,22 +1,22 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: etcd
+  name: etcd-codespaces-7d779f
   namespace: kube-system
 spec:
   hostNetwork: true
-  dnsPolicy: ClusterFirstWithHostNet
   containers:
   - name: etcd
     image: registry.k8s.io/etcd:3.5.12-0
     command:
     - etcd
-    - --advertise-client-urls=http://127.0.0.1:2379
+    - --advertise-client-urls=http://10.0.12.129:2379
     - --listen-client-urls=http://0.0.0.0:2379
     - --listen-peer-urls=http://0.0.0.0:2380
-    - --initial-advertise-peer-urls=http://127.0.0.1:2380
-    - --initial-cluster=default=http://127.0.0.1:2380
+    - --initial-advertise-peer-urls=http://10.0.12.129:2380
+    - --initial-cluster=default=http://10.0.12.129:2380
     - --initial-cluster-state=new
+    - --initial-cluster-token=mini-token
     - --data-dir=/var/lib/etcd
     volumeMounts:
     - name: data
@@ -24,5 +24,5 @@ spec:
   volumes:
   - name: data
     hostPath:
-      path: /var/lib/etcd
+      path: /workspaces/my-cs-test/etcd
       type: DirectoryOrCreate

@@ -1,28 +1,25 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: kube-scheduler
+  name: kube-scheduler-codespaces-7d779f
   namespace: kube-system
-  labels:
-    component: kube-scheduler
 spec:
   hostNetwork: true
-  priorityClassName: system-cluster-critical
   containers:
   - name: kube-scheduler
     image: registry.k8s.io/kube-scheduler:v1.30.0
     command:
-      - kube-scheduler
-      - --kubeconfig=/etc/kubernetes/scheduler.kubeconfig
-      - --leader-elect=false
-      - --bind-address=0.0.0.0
-      - --v=2
+    - kube-scheduler
+    - --kubeconfig=/etc/kubernetes/scheduler.kubeconfig
+    - --leader-elect=false
+    - --v=2
     volumeMounts:
-      - name: kc
-        mountPath: /etc/kubernetes/scheduler.kubeconfig
-        readOnly: true
-  volumes:
     - name: kc
-      hostPath:
-        path: /var/lib/kubelet/kubeconfig   # ЭТО ФАЙЛ
-        type: File
+      mountPath: /etc/kubernetes/scheduler.kubeconfig
+      subPath: scheduler.kubeconfig
+      readOnly: true
+  volumes:
+  - name: kc
+    hostPath:
+      path: /etc/kubernetes
+      type: Directory
