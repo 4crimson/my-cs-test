@@ -10,11 +10,11 @@ spec:
     image: registry.k8s.io/etcd:3.5.12-0
     command:
     - etcd
-    - --advertise-client-urls=http://10.0.12.129:2379
+    - --advertise-client-urls=http://10.0.12.205:2379
     - --listen-client-urls=http://0.0.0.0:2379
     - --listen-peer-urls=http://0.0.0.0:2380
-    - --initial-advertise-peer-urls=http://10.0.12.129:2380
-    - --initial-cluster=default=http://10.0.12.129:2380
+    - --initial-advertise-peer-urls=http://10.0.12.205:2380
+    - --initial-cluster=default=http://10.0.12.205:2380
     - --initial-cluster-state=new
     - --initial-cluster-token=mini-token
     - --data-dir=/var/lib/etcd

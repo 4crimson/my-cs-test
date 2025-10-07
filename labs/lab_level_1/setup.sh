@@ -31,6 +31,11 @@ CONTAINERD_CONF="/etc/containerd/config.toml"
 CNI_CONF_DIR="/etc/cni/net.d"
 
 DEV_TOKEN="1234567890"
+HOST_IP_FILE="${KUBE_DIR}/.last_host_ip"
+
+### NEW: crictl для проверки CRI
+CRICTL_BIN="/usr/local/bin/crictl"
+CRICTL_VER="v1.30.0"
 
 log()  { echo -e "\e[1;32m[mini-k8s]\e[0m $*"; }
 warn() { echo -e "\e[1;33m[mini-k8s]\e[0m $*"; }
@@ -40,16 +45,32 @@ need_cmd() { command -v "$1" >/dev/null 2>&1 || { err "Требуется ком
 is_valid_pem() { sudo head -n1 "$1" 2>/dev/null | grep -q "BEGIN CERTIFICATE"; }
 
 detect_host_ip() {
-  # В Codespaces надёжнее так, чем hostname -I
   HOST_IP="$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if ($i=="src"){print $(i+1); exit}}' || true)"
   if [[ -z "${HOST_IP:-}" ]]; then HOST_IP="$(hostname -I | awk '{print $1}')"; fi
   export HOST_IP
   log "HOST_IP=${HOST_IP}"
+
+  if [ -f "${HOST_IP_FILE}" ]; then LAST_IP="$(cat "${HOST_IP_FILE}" || true)"; else LAST_IP=""; fi
+  if [ "${LAST_IP}" != "${HOST_IP}" ]; then
+    warn "Обнаружена смена HOST_IP: ${LAST_IP} -> ${HOST_IP}. Сбрасываю данные etcd…"
+    sudo rm -rf "${ETCD_DATA}"
+  fi
+  echo "${HOST_IP}" | sudo tee "${HOST_IP_FILE}" >/dev/null
+}
+
+detect_cgroup_mode() {
+  if [ -d /run/systemd/system ] && [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ]; then
+    export USE_SYSTEMD_CGROUP="true"
+    export KUBELET_CGROUP_DRIVER="systemd"
+  else
+    export USE_SYSTEMD_CGROUP="false"
+    export KUBELET_CGROUP_DRIVER="cgroupfs"
+  fi
+  log "cgroups: SystemdCgroup=${USE_SYSTEMD_CGROUP}, kubelet.cgroupDriver=${KUBELET_CGROUP_DRIVER}"
 }
 
 tune_sysctls() {
   log "Включаю sysctl для CNI…"
-  # ip_forward и bridge-nf вызовы, чтобы pod-to-pod и SNAT работали
   echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward >/dev/null
   sudo sysctl -w net.bridge.bridge-nf-call-iptables=1 >/dev/null 2>&1 || true
   sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1 >/dev/null 2>&1 || true
@@ -94,6 +115,14 @@ install_prereqs() {
     sudo tar zxf /tmp/cni.tgz -C "${CNI_DIR}/bin"
     rm -f /tmp/cni.tgz
   fi
+
+  ### NEW: crictl (удобно и для health-check)
+  if [ ! -x "${CRICTL_BIN}" ]; then
+    log "Ставлю crictl ${CRICTL_VER}…"
+    curl -fsSL -o /tmp/crictl.tgz "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VER}/crictl-${CRICTL_VER}-linux-amd64.tar.gz"
+    sudo tar -C /usr/local/bin -xzf /tmp/crictl.tgz crictl
+    rm -f /tmp/crictl.tgz
+  fi
 }
 
 write_cni_config() {
@@ -113,16 +142,21 @@ write_cni_config() {
   }
 }
 EOF
+  cat <<'EOF' | sudo tee "${CNI_CONF_DIR}/99-loopback.conf" >/dev/null
+{
+  "cniVersion": "0.3.1",
+  "name": "lo",
+  "type": "loopback"
+}
+EOF
 }
 
 write_containerd_config() {
-  if [ -f "${CONTAINERD_CONF}" ]; then
-    log "containerd config уже есть"
-    return
-  fi
-  log "Пишу containerd config…"
+  log "Пишу/правлю containerd config…"
   sudo mkdir -p "$(dirname "${CONTAINERD_CONF}")"
-  cat <<EOF | sudo tee "${CONTAINERD_CONF}" >/dev/null
+
+  if [ ! -f "${CONTAINERD_CONF}" ]; then
+    cat <<EOF | sudo tee "${CONTAINERD_CONF}" >/dev/null
 version = 3
 
 [grpc]
@@ -145,25 +179,58 @@ version = 3
   runtime_type = "io.containerd.runc.v2"
 
 [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc.options]
-  SystemdCgroup = true
+  SystemdCgroup = ${USE_SYSTEMD_CGROUP}
 EOF
+  else
+    if grep -q 'SystemdCgroup' "${CONTAINERD_CONF}"; then
+      sudo sed -ri "s/^( *SystemdCgroup *= *).*/\1${USE_SYSTEMD_CGROUP}/" "${CONTAINERD_CONF}"
+    else
+      sudo awk -v v="${USE_SYSTEMD_CGROUP}" '
+        {print}
+        /^\[plugins\."io\.containerd\.cri\.v1\.runtime"\.containerd\.runtimes\.runc\.options\]/ {print "  SystemdCgroup = " v}
+      ' "${CONTAINERD_CONF}" | sudo tee "${CONTAINERD_CONF}.new" >/dev/null \
+      && sudo mv "${CONTAINERD_CONF}.new" "${CONTAINERD_CONF}"
+    fi
+  fi
 }
 
 start_containerd() {
+  # принудительный рестарт, чтобы перечитал конфиг
   if pgrep -xf "${CONTAINERD_BIN} -c ${CONTAINERD_CONF}" >/dev/null 2>&1; then
-    log "containerd уже запущен"
+    log "containerd уже запущен — перезапускаю…"
+    sudo pkill -xf "${CONTAINERD_BIN} -c ${CONTAINERD_CONF}" || true
+    sleep 1
   else
     log "Стартую containerd…"
-    nohup "${CONTAINERD_BIN}" -c "${CONTAINERD_CONF}" >/var/log/containerd.log 2>&1 & disown
-    for i in {1..30}; do
-      [ -S /run/containerd/containerd.sock ] && break || sleep 1
-    done
   fi
+
+  # лог и pid под root (исправляет 'Permission denied' и отсутствие сокета)
+  sudo touch /var/log/containerd.log
+  sudo mkdir -p "${CONTAINERD_STATE}"
+  sudo sh -c 'nohup "'"${CONTAINERD_BIN}"'" -c "'"${CONTAINERD_CONF}"'" >>/var/log/containerd.log 2>&1 & echo $! >"'"${CONTAINERD_STATE}"'"/containerd.pid'
+
+  # ждём сокет
+  for i in {1..60}; do
+    [ -S /run/containerd/containerd.sock ] && break || sleep 1
+  done
+  if [ ! -S /run/containerd/containerd.sock ]; then
+    err "containerd сокет не появился. Хвост лога:"
+    sudo tail -n 120 /var/log/containerd.log || true
+    exit 1
+  fi
+
+  ### NEW: проверка, что CRI реально отвечает (а не просто сокет существует)
+  for i in {1..30}; do
+    if sudo "${CTR_BIN}" version >/dev/null 2>&1; then break; fi
+    sleep 1
+  done || { err "containerd не отвечает на ctr"; exit 1; }
+
+  # настроим crictl на наш CRI сокет (без фатала, если уже было)
+  sudo "${CRICTL_BIN}" config --set runtime-endpoint=unix:///run/containerd/containerd.sock >/dev/null 2>&1 || true
 }
 
 gen_pki_and_tokens() {
   log "Генерация ключей/сертификатов и токена…"
-  # SA ключи
   if [ ! -f "${PKI_DIR}/sa.key" ]; then
     sudo openssl genrsa -out "${PKI_DIR}/sa.key" 2048
     sudo openssl rsa -in "${PKI_DIR}/sa.key" -pubout -out "${PKI_DIR}/sa.pub"
@@ -171,7 +238,6 @@ gen_pki_and_tokens() {
     sudo chmod 644 "${PKI_DIR}/sa.pub"
   fi
 
-  # CA (создаём если нет или файл не валиден)
   if [ ! -f "${PKI_DIR}/ca.crt" ] || ! is_valid_pem "${PKI_DIR}/ca.crt"; then
     warn "Пересоздаю CA (/etc/kubernetes/pki/ca.crt)…"
     sudo openssl genrsa -out "${PKI_DIR}/ca.key" 2048
@@ -180,12 +246,10 @@ gen_pki_and_tokens() {
     sudo chmod 644 "${PKI_DIR}/ca.crt"
   fi
 
-  # kubelet должен видеть clientCAFile — копии
   sudo mkdir -p "${KUBELET_DIR}/pki"
   sudo install -m 0644 "${PKI_DIR}/ca.crt" "${KUBELET_DIR}/ca.crt"
   sudo install -m 0644 "${PKI_DIR}/ca.crt" "${KUBELET_DIR}/pki/ca.crt"
 
-  # kubelet serving cert (до старта kubelet!)
   if [ ! -f "${KUBELET_DIR}/pki/kubelet.crt" ] || [ ! -f "${KUBELET_DIR}/pki/kubelet.key" ]; then
     log "Генерирую self-signed сертификат для kubelet сервера…"
     sudo openssl req -x509 -newkey rsa:2048 -nodes \
@@ -196,7 +260,6 @@ gen_pki_and_tokens() {
     sudo chmod 644 "${KUBELET_DIR}/pki/kubelet.crt"
   fi
 
-  # dev токен
   echo "${DEV_TOKEN},admin,admin,system:masters" | sudo tee "${KUBE_DIR}/token.csv" >/dev/null
   sudo chmod 600 "${KUBE_DIR}/token.csv"
 }
@@ -225,7 +288,7 @@ seccompDefault: true
 serverTLSBootstrap: false
 containerRuntimeEndpoint: "unix:///run/containerd/containerd.sock"
 staticPodPath: "${MANIFESTS_DIR}"
-cgroupDriver: "systemd"
+cgroupDriver: "${KUBELET_CGROUP_DRIVER}"
 EOF
   sudo chmod 644 "${KUBELET_DIR}/config.yaml"
 }
@@ -238,7 +301,6 @@ write_shared_kubeconfigs() {
   "${BIN_DIR}/kubectl" config set-context mini --cluster=mini --user=dev --namespace=default
   "${BIN_DIR}/kubectl" config use-context mini
 
-  # kubeconfig для kubelet — должен существовать до запуска
   sudo install -m 0644 -D /root/.kube/config "${KUBELET_DIR}/kubeconfig"
 
   cat <<EOF | sudo tee "${KUBE_DIR}/controller-manager.kubeconfig" >/dev/null
@@ -268,7 +330,6 @@ write_static_pods() {
   local NODE_NAME; NODE_NAME="$(hostname)"
   log "Пишу static pod манифесты…"
 
-  # etcd
   cat <<EOF | sudo tee "${MANIFESTS_DIR}/etcd.yaml" >/dev/null
 apiVersion: v1
 kind: Pod
@@ -300,7 +361,6 @@ spec:
       type: DirectoryOrCreate
 EOF
 
-  # kube-apiserver
   cat <<EOF | sudo tee "${MANIFESTS_DIR}/kube-apiserver.yaml" >/dev/null
 apiVersion: v1
 kind: Pod
@@ -321,7 +381,6 @@ spec:
     - --advertise-address=${HOST_IP}
     - --authorization-mode=AlwaysAllow
     - --allow-privileged=true
-    - --enable-priority-and-fairness=false
     - --storage-backend=etcd3
     - --storage-media-type=application/json
     - --client-ca-file=/etc/kubernetes/pki/ca.crt
@@ -349,7 +408,6 @@ spec:
       type: Directory
 EOF
 
-  # kube-controller-manager
   cat <<EOF | sudo tee "${MANIFESTS_DIR}/kube-controller-manager.yaml" >/dev/null
 apiVersion: v1
 kind: Pod
@@ -390,7 +448,6 @@ spec:
       type: Directory
 EOF
 
-  # kube-scheduler
   cat <<EOF | sudo tee "${MANIFESTS_DIR}/kube-scheduler.yaml" >/dev/null
 apiVersion: v1
 kind: Pod
@@ -406,6 +463,8 @@ spec:
     - kube-scheduler
     - --kubeconfig=/etc/kubernetes/scheduler.kubeconfig
     - --leader-elect=false
+    - --bind-address=0.0.0.0
+    - --secure-port=10260
     - --v=2
     volumeMounts:
     - name: kc
@@ -422,16 +481,16 @@ EOF
 
 prepull_images() {
   log "Предзагрузка образов control-plane… (best-effort)"
-  "${CTR_BIN}" -n k8s.io images pull "${ETCD_IMG}" || true
-  "${CTR_BIN}" -n k8s.io images pull "${APISERVER_IMG}" || true
-  "${CTR_BIN}" -n k8s.io images pull "${KCM_IMG}" || true
-  "${CTR_BIN}" -n k8s.io images pull "${SCHED_IMG}" || true
-  "${CTR_BIN}" -n k8s.io images pull "${PAUSE_IMG}" || true
+  sudo "${CTR_BIN}" -n k8s.io images pull "${ETCD_IMG}" || true
+  sudo "${CTR_BIN}" -n k8s.io images pull "${APISERVER_IMG}" || true
+  sudo "${CTR_BIN}" -n k8s.io images pull "${KCM_IMG}" || true
+  sudo "${CTR_BIN}" -n k8s.io images pull "${SCHED_IMG}" || true
+  sudo "${CTR_BIN}" -n k8s.io images pull "${PAUSE_IMG}" || true
 }
 
 start_kubelet() {
-  if pgrep -f "${BIN_DIR}/kubelet .*--config=${KUBELET_DIR}/config.yaml" >/dev/null 2>&1; then
-    log "kubelet уже запущен"; return; fi
+  ### NEW: убьём старый kubelet, чтобы не было гонок
+  sudo pkill -f "${BIN_DIR}/kubelet" >/dev/null 2>&1 || true
 
   [ -f "${KUBELET_DIR}/kubeconfig" ] || sudo install -m 0644 -D /root/.kube/config "${KUBELET_DIR}/kubeconfig"
   [ -f "${KUBELET_DIR}/pki/kubelet.crt" ] || err "нет ${KUBELET_DIR}/pki/kubelet.crt"
@@ -452,7 +511,7 @@ nohup "'"${BIN_DIR}"'/kubelet" \
   --hostname-override="'"${HOSTNAME}"'" \
   --pod-infra-container-image="'"${PAUSE_IMG}"'" \
   --node-ip="'"${HOST_IP}"'" \
-  --max-pods=20 \
+  --max-pods=110 \
   --v=1 >>/var/log/kubelet.log 2>&1 & disown'
 }
 
@@ -466,6 +525,16 @@ wait_apiserver() {
   warn "API server не ответил за отведённое время"; return 1
 }
 
+write_user_kubeconfig() {
+  if [ -n "${SUDO_UID:-}" ] && [ "${SUDO_UID}" != "0" ]; then
+    local uhome
+    uhome="$(getent passwd "${SUDO_UID}" | cut -d: -f6)"
+    sudo install -Dm600 /root/.kube/config "${uhome}/.kube/config"
+    sudo chown "${SUDO_UID}:${SUDO_GID}" "${uhome}/.kube/config"
+    log "Скопировал kubeconfig в ${uhome}/.kube/config"
+  fi
+}
+
 status() {
   log "Проверка статуса…"
   "${BIN_DIR}/kubectl" get nodes -o wide || true
@@ -475,16 +544,21 @@ status() {
 
 start() {
   detect_host_ip
+  detect_cgroup_mode
   tune_sysctls
   install_prereqs
   write_cni_config
   write_containerd_config
   start_containerd
+  ### NEW: убедиться, что CRI отвечает, до pull'ов и kubelet
+  sudo "${CRICTL_BIN}" info >/dev/null 2>&1 || true
+
+  prepull_images
   gen_pki_and_tokens
   write_kubelet_config
   write_shared_kubeconfigs
+  write_user_kubeconfig
   write_static_pods
-  prepull_images
   start_kubelet
   wait_apiserver || true
   status
@@ -525,4 +599,3 @@ case "${1:-}" in
     exit 1
     ;;
 esac
-

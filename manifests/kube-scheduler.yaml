@@ -12,6 +12,8 @@ spec:
     - kube-scheduler
     - --kubeconfig=/etc/kubernetes/scheduler.kubeconfig
     - --leader-elect=false
+    - --bind-address=0.0.0.0
+    - --secure-port=10260         # <— добавили/заменили
     - --v=2
     volumeMounts:
     - name: kc
