@@ -194,6 +194,7 @@ staticPodPath: "/etc/kubernetes/manifests"
 EOF
 
     # Create required directories with proper permissions
+    sudo mkdir -p /var/lib/etcd
     sudo mkdir -p /var/lib/kubelet/pods
     sudo chmod 750 /var/lib/kubelet/pods
     sudo mkdir -p /var/lib/kubelet/plugins
@@ -218,18 +219,162 @@ EOF
     fi
 }
 
+generate_static_pods() {
+    HOST_IP=$(hostname -I | awk '{print $1}')
+
+    # etcd static pod
+    cat <<EOF | sudo tee /etc/kubernetes/manifests/etcd.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: etcd
+  namespace: kube-system
+spec:
+  hostNetwork: true
+  priorityClassName: system-cluster-critical
+  containers:
+  - name: etcd
+    image: registry.k8s.io/etcd:3.5.10-0
+    command:
+    - etcd
+    - --advertise-client-urls=http://${HOST_IP}:2379
+    - --listen-client-urls=http://0.0.0.0:2379
+    - --data-dir=/var/lib/etcd
+    - --initial-advertise-peer-urls=http://${HOST_IP}:2380
+    - --listen-peer-urls=http://0.0.0.0:2380
+    - --initial-cluster=default=http://${HOST_IP}:2380
+    - --initial-cluster-state=new
+    - --initial-cluster-token=test-token
+    volumeMounts:
+    - name: etcd-data
+      mountPath: /var/lib/etcd
+  volumes:
+  - name: etcd-data
+    hostPath:
+      path: /var/lib/etcd
+      type: DirectoryOrCreate
+EOF
+
+    # kube-apiserver static pod
+    cat <<EOF | sudo tee /etc/kubernetes/manifests/kube-apiserver.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-apiserver
+  namespace: kube-system
+spec:
+  hostNetwork: true
+  priorityClassName: system-cluster-critical
+  containers:
+  - name: kube-apiserver
+    image: registry.k8s.io/kube-apiserver:v1.30.0
+    command:
+    - kube-apiserver
+    - --etcd-servers=http://${HOST_IP}:2379
+    - --service-cluster-ip-range=10.0.0.0/24
+    - --bind-address=0.0.0.0
+    - --secure-port=6443
+    - --advertise-address=${HOST_IP}
+    - --authorization-mode=AlwaysAllow
+    - --token-auth-file=/host-tmp/token.csv
+    - --enable-priority-and-fairness=false
+    - --allow-privileged=true
+    - --profiling=false
+    - --storage-backend=etcd3
+    - --storage-media-type=application/json
+    - --cloud-provider=external
+    - --service-account-issuer=https://kubernetes.default.svc.cluster.local
+    - --service-account-key-file=/host-tmp/sa.pub
+    - --service-account-signing-key-file=/host-tmp/sa.key
+    volumeMounts:
+    - name: host-tmp
+      mountPath: /host-tmp
+      readOnly: true
+  volumes:
+  - name: host-tmp
+    hostPath:
+      path: /tmp
+      type: Directory
+EOF
+
+    # kube-controller-manager static pod
+    cat <<EOF | sudo tee /etc/kubernetes/manifests/kube-controller-manager.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-controller-manager
+  namespace: kube-system
+spec:
+  hostNetwork: true
+  priorityClassName: system-cluster-critical
+  containers:
+  - name: kube-controller-manager
+    image: registry.k8s.io/kube-controller-manager:v1.30.0
+    command:
+    - kube-controller-manager
+    - --kubeconfig=/host-kube/kubeconfig
+    - --leader-elect=false
+    - --cloud-provider=external
+    - --service-cluster-ip-range=10.0.0.0/24
+    - --cluster-name=kubernetes
+    - --root-ca-file=/host-kube/ca.crt
+    - --service-account-private-key-file=/host-tmp/sa.key
+    - --use-service-account-credentials=true
+    - --v=2
+    volumeMounts:
+    - name: host-kube
+      mountPath: /host-kube
+      readOnly: true
+    - name: host-tmp
+      mountPath: /host-tmp
+      readOnly: true
+  volumes:
+  - name: host-kube
+    hostPath:
+      path: /var/lib/kubelet
+      type: Directory
+  - name: host-tmp
+    hostPath:
+      path: /tmp
+      type: Directory
+EOF
+
+    # kube-scheduler static pod
+    cat <<EOF | sudo tee /etc/kubernetes/manifests/kube-scheduler.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-scheduler
+  namespace: kube-system
+spec:
+  hostNetwork: true
+  priorityClassName: system-cluster-critical
+  containers:
+  - name: kube-scheduler
+    image: registry.k8s.io/kube-scheduler:v1.30.0
+    command:
+    - kube-scheduler
+    - --kubeconfig=/host-kube/kubeconfig
+    - --leader-elect=false
+    - --v=2
+    volumeMounts:
+    - name: host-kube
+      mountPath: /host-kube
+      readOnly: true
+  volumes:
+  - name: host-kube
+    hostPath:
+      path: /var/lib/kubelet
+      type: Directory
+EOF
+}
+
 start() {
     if check_running; then
         echo "Kubernetes components are already running"
         return 0
     fi
 
-    # Сделать исполняемым
-    chmod +x detect_ip.sh
-
-    # Выполнить и экспортировать переменную
-    eval "$(bash ./detect_ip.sh)"
-    echo "$HOST_IP"
     HOST_IP=$(hostname -I | awk '{print $1}')
     
     # Download components if needed
@@ -238,56 +383,15 @@ start() {
     # Setup configurations
     setup_configs
 
-    # Start components if not running
-    if ! is_running "etcd"; then
-        echo "Starting etcd..."
-        sudo kubebuilder/bin/etcd \
-            --advertise-client-urls http://$HOST_IP:2379 \
-            --listen-client-urls http://0.0.0.0:2379 \
-            --data-dir ./etcd \
-            --listen-peer-urls http://0.0.0.0:2380 \
-            --initial-cluster default=http://$HOST_IP:2380 \
-            --initial-advertise-peer-urls http://$HOST_IP:2380 \
-            --initial-cluster-state new \
-            --initial-cluster-token test-token &
-    fi
+    # Generate control-plane static pods
+    generate_static_pods
 
-    if ! is_running "kube-apiserver"; then
-        echo "Starting kube-apiserver..."
-        echo "use application/vnd.kubernetes.protobuf for better performance"
-        sudo kubebuilder/bin/kube-apiserver \
-            --etcd-servers=http://$HOST_IP:2379 \
-            --service-cluster-ip-range=10.0.0.0/24 \
-            --bind-address=0.0.0.0 \
-            --secure-port=6443 \
-            --advertise-address=$HOST_IP \
-            --authorization-mode=AlwaysAllow \
-            --token-auth-file=/tmp/token.csv \
-            --enable-priority-and-fairness=false \
-            --allow-privileged=true \
-            --profiling=false \
-            --storage-backend=etcd3 \
-            --storage-media-type=application/json \
-            --v=0 \
-            --service-account-issuer=https://kubernetes.default.svc.cluster.local \
-            --service-account-key-file=/tmp/sa.pub \
-            --service-account-signing-key-file=/tmp/sa.key &
-    fi
-            #--cloud-provider=external \ Локалка / учебный стенд вообще не указывать --cloud-provider=external ни kubelet’у, ни apiserver/controller’ам.
+    # Start components if not running
 
     if ! is_running "containerd"; then
         echo "Starting containerd..."
         export PATH=$PATH:/opt/cni/bin:kubebuilder/bin
         sudo PATH=$PATH:/opt/cni/bin:/usr/sbin /opt/cni/bin/containerd -c /etc/containerd/config.toml &
-    fi
-
-    if ! is_running "kube-scheduler"; then
-        echo "Starting kube-scheduler..."
-        sudo kubebuilder/bin/kube-scheduler \
-            --kubeconfig=/root/.kube/config \
-            --leader-elect=false \
-            --v=2 \
-            --bind-address=0.0.0.0 &
     fi
 
     # Set up kubelet kubeconfig
@@ -321,20 +425,6 @@ start() {
     # Label the node so static pods with nodeSelector can be scheduled
     NODE_NAME=$(hostname)
     sudo kubebuilder/bin/kubectl label node "$NODE_NAME" node-role.kubernetes.io/master="" --overwrite || true
-
-    if ! is_running "kube-controller-manager"; then
-        echo "Starting kube-controller-manager..."
-        sudo PATH=$PATH:/opt/cni/bin:/usr/sbin kubebuilder/bin/kube-controller-manager \
-            --kubeconfig=/var/lib/kubelet/kubeconfig \
-            --leader-elect=false \
-            --cloud-provider=external \
-            --service-cluster-ip-range=10.0.0.0/24 \
-            --cluster-name=kubernetes \
-            --root-ca-file=/var/lib/kubelet/ca.crt \
-            --service-account-private-key-file=/tmp/sa.key \
-            --use-service-account-credentials=true \
-            --v=2 &
-    fi
 
     echo "Waiting for components to be ready..."
     sleep 10

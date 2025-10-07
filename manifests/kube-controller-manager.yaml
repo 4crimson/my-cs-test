@@ -15,7 +15,7 @@ spec:
       - --service-account-private-key-file=/etc/kubernetes/pki/sa.key
       - --root-ca-file=/etc/kubernetes/pki/ca.crt
       - --leader-elect=false
-      - --port=0
+      - --bind-address=127.0.0.1
       - --secure-port=10257
     volumeMounts:
       - { name: pki, mountPath: /etc/kubernetes/pki, readOnly: true }

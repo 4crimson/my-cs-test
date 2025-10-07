@@ -3,21 +3,26 @@ kind: Pod
 metadata:
   name: kube-scheduler
   namespace: kube-system
+  labels:
+    component: kube-scheduler
 spec:
   hostNetwork: true
-  dnsPolicy: ClusterFirstWithHostNet
+  priorityClassName: system-cluster-critical
   containers:
   - name: kube-scheduler
     image: registry.k8s.io/kube-scheduler:v1.30.0
     command:
       - kube-scheduler
-      - --kubeconfig=/etc/kubernetes/scheduler.conf
-      - --authentication-kubeconfig=/etc/kubernetes/scheduler.conf
-      - --authorization-kubeconfig=/etc/kubernetes/scheduler.conf
+      - --kubeconfig=/etc/kubernetes/scheduler.kubeconfig
       - --leader-elect=false
-      - --port=0
-      - --secure-port=10259
+      - --bind-address=0.0.0.0
+      - --v=2
     volumeMounts:
-      - { name: cfg, mountPath: /etc/kubernetes }
+      - name: kc
+        mountPath: /etc/kubernetes/scheduler.kubeconfig
+        readOnly: true
   volumes:
-    - { name: cfg, hostPath: { path: /etc/kubernetes } }
+    - name: kc
+      hostPath:
+        path: /var/lib/kubelet/kubeconfig   # ЭТО ФАЙЛ
+        type: File
