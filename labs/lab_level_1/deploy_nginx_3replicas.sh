@@ -153,6 +153,23 @@ wait_endpoints() {
   return 1
 }
 
+diag_net() {
+  log "Проверяю DNS и kube-proxy:"
+  "$KUBECTL" --kubeconfig="$TMP_KCFG" -n kube-system get svc kube-dns 2>/dev/null || warn "нет kube-dns"
+  "$KUBECTL" --kubeconfig="$TMP_KCFG" -n kube-system get deploy coredns 2>/dev/null || warn "нет coredns"
+  "$KUBECTL" --kubeconfig="$TMP_KCFG" -n kube-system get ds kube-proxy 2>/dev/null || warn "нет kube-proxy (или он не DaemonSet)"
+}
+
+svc_cluster_ip() {
+  # $1 = namespace, $2 = service name
+  "$KUBECTL" --kubeconfig="$TMP_KCFG" -n "$1" get svc "$2" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true
+}
+
+one_endpoint_ip() {
+  # $1 = namespace, $2 = service name
+  "$KUBECTL" --kubeconfig="$TMP_KCFG" -n "$1" get endpoints "$2" -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || true
+}
+
 show_info() {
   log "Поды:"
   "$KUBECTL" --kubeconfig="$TMP_KCFG" -n "${NS}" get pods -o wide || true
@@ -160,9 +177,33 @@ show_info() {
   "$KUBECTL" --kubeconfig="$TMP_KCFG" -n "${NS}" get svc web || true
   log "Эндпойнты:"
   "$KUBECTL" --kubeconfig="$TMP_KCFG" -n "${NS}" get endpoints web || true
-  log "Пробный HTTP через временный pod:"
+
+  log "Пробный HTTP через временный pod (DNS → ClusterIP → PodIP):"
+  # 1) DNS путь
   "$KUBECTL" --kubeconfig="$TMP_KCFG" -n "${NS}" run curl --image=curlimages/curl:8.11.1 --restart=Never -it --rm -- \
-      sh -lc 'curl -sS http://web.demo-nginx.svc.cluster.local/ | head -n1' || true
+    sh -lc 'echo "== DNS =="; curl -sS http://web.demo-nginx.svc.cluster.local/ | head -n1' \
+    && return 0 || true
+
+  # 2) Путь по ClusterIP
+  CIP="$(svc_cluster_ip "${NS}" web)"
+  if [ -n "$CIP" ] && [ "$CIP" != "None" ]; then
+    log "DNS не сработал. Пробую ClusterIP: ${CIP}"
+    "$KUBECTL" --kubeconfig="$TMP_KCFG" -n "${NS}" run curl --image=curlimages/curl:8.11.1 --restart=Never -it --rm -- \
+      sh -lc 'echo "== ClusterIP == ("$CIP")"; curl -sS http://'"$CIP"'/ | head -n1' \
+      && return 0 || true
+  fi
+
+  # 3) Прямо в Pod IP (из Endpoints)
+  EPIP="$(one_endpoint_ip "${NS}" web)"
+  if [ -n "$EPIP" ]; then
+    log "ClusterIP не сработал. Пробую PodIP: ${EPIP}:80"
+    "$KUBECTL" --kubeconfig="$TMP_KCFG" -n "${NS}" run curl --image=curlimages/curl:8.11.1 --restart=Never -it --rm -- \
+      sh -lc 'echo "== PodIP == ("$EPIP")"; curl -sS http://'"$EPIP"':80/ | head -n1' \
+      && return 0 || true
+  fi
+
+  warn "Не удалось получить ответ ни по DNS, ни по ClusterIP, ни по PodIP."
+  echo "Подсказка: установи kube-proxy и CoreDNS, либо используй headless-сервис."
 }
 
 main() {
@@ -178,6 +219,7 @@ main() {
   "$KUBECTL" --kubeconfig="$TMP_KCFG" -n "${NS}" scale deploy web --replicas=3
   wait_rollout
   wait_endpoints
+  diag_net
   show_info
 }
 
